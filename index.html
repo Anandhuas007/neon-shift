@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neon Puzzle Platformer</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #111;
+            font-family: 'Courier New', Courier, monospace;
+            user-select: none;
+        }
+        #gameCanvas {
+            display: block;
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #00ffcc;
+            pointer-events: none;
+            z-index: 10;
+        }
+        h1 {
+            margin: 0;
+            font-size: 24px;
+            text-shadow: 0 0 10px #00ffcc;
+        }
+        p {
+            margin: 5px 0;
+            font-size: 14px;
+            color: #aaa;
+        }
+        #level-indicator {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            font-size: 30px;
+            font-weight: bold;
+            color: #ff0055;
+            text-shadow: 0 0 10px #ff0055;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <h1>NEON SHIFT</h1>
+        <p>[A/D] Move &nbsp; [SPACE] Jump / Double Jump</p>
+        <p>[MOUSE] Drag Orange Blocks</p>
+    </div>
+    <div id="level-indicator">LEVEL 1</div>
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // --- CONFIGURATION ---
+        const CONFIG = {
+            gravity: 0.6,
+            friction: 0.8,
+            playerSpeed: 1.0,
+            playerJump: 12,
+            blockSize: 50,
+            worldMultiplier: 2.5, // Map is 2.5x screen width
+            colors: {
+                player: '#00ffcc',
+                blockStatic: '#444',
+                blockMovable: '#ff8800',
+                portal: '#00ff00',
+                gate: '#0088ff',
+                void: '#550000', // New color for void
+                bg: '#111',
+                specter: '#ff0000' // New color for Specter
+            }
+        };
+
+        let screenWidth, screenHeight;
+        let worldWidth;
+        let cameraX = 0;
+        
+        function resize() {
+            screenWidth = canvas.width = window.innerWidth;
+            screenHeight = canvas.height = window.innerHeight;
+            worldWidth = screenWidth * CONFIG.worldMultiplier;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // --- GAME STATE ---
+        let level = 1; // This now controls the difficulty seed, but doesn't auto-increment.
+        let particles = [];
+        
+        const keys = {
+            a: false,
+            d: false,
+            space: false,
+            spacePressed: false
+        };
+
+        const mouse = {
+            x: 0,
+            y: 0,
+            worldX: 0, // Mouse X relative to world
+            down: false,
+            draggedBlock: null
+        };
+
+        // --- CLASSES ---
+
+        class Entity {
+            constructor(x, y, w, h, color) {
+                this.x = x;
+                this.y = y;
+                this.w = w;
+                this.h = h;
+                this.vx = 0;
+                this.vy = 0;
+                this.color = color;
+                this.grounded = false;
+            }
+
+            draw() {
+                ctx.fillStyle = this.color;
+                ctx.fillRect(this.x, this.y, this.w, this.h);
+                
+                // Neon Glow
+                ctx.shadowBlur = 15;
+                ctx.shadowColor = this.color;
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(this.x, this.y, this.w, this.h);
+                ctx.shadowBlur = 0;
+            }
+
+            update() {
+                // Apply Gravity
+                this.vy += CONFIG.gravity;
+                this.y += this.vy;
+                this.x += this.vx;
+            }
+        }
+
+        class Gate extends Entity { // Extend Entity for consistent drawing/positioning
+            constructor(x, y, isExit) {
+                super(x, y, 80, 120, isExit ? CONFIG.colors.portal : CONFIG.colors.gate);
+                this.isExit = isExit;
+            }
+
+            draw() {
+                ctx.shadowBlur = 20;
+                ctx.shadowColor = this.color;
+                ctx.strokeStyle = this.color;
+                ctx.lineWidth = 4;
+
+                // Left Pillar
+                ctx.strokeRect(this.x, this.y, 10, this.h);
+                // Right Pillar
+                ctx.strokeRect(this.x + this.w - 10, this.y, 10, this.h);
+                // Top Bar
+                ctx.strokeRect(this.x, this.y, this.w, 10);
+
+                // Inner Portal Effect (Only for exit)
+                if (this.isExit) {
+                    ctx.fillStyle = this.color;
+                    ctx.globalAlpha = 0.3 + Math.sin(Date.now() * 0.005) * 0.1;
+                    ctx.fillRect(this.x + 10, this.y + 10, this.w - 20, this.h);
+                    ctx.globalAlpha = 1;
+                }
+                ctx.shadowBlur = 0;
+            }
+            update() { /* No physics needed */ } 
+        }
+        
+        class VoidZone extends Entity {
+            constructor(x, y, w, h) {
+                super(x, y, w, h, CONFIG.colors.void); // Dark red/maroon
+            }
+            draw() {
+                // Draw a subtle red glow / warning border
+                ctx.fillStyle = this.color;
+                ctx.fillRect(this.x, this.y, this.w, this.h);
+                
+                ctx.shadowBlur = 10;
+                ctx.shadowColor = '#ff0000';
+                ctx.strokeStyle = '#ff0000';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(this.x, this.y, this.w, this.h);
+                ctx.shadowBlur = 0;
+            }
+            update() { /* No physics needed */ } 
+        }
+
+        class Player extends Entity {
+            constructor(x, y) {
+                super(x, y, 40, 40, CONFIG.colors.player);
+                this.jumps = 0;
+                this.maxJumps = 2;
+            }
+
+            update(blocks) {
+                // Horizontal Movement
+                if (keys.a) this.vx -= CONFIG.playerSpeed;
+                if (keys.d) this.vx += CONFIG.playerSpeed;
+                
+                this.vx *= CONFIG.friction;
+
+                // Physics Step X
+                this.x += this.vx;
+                this.checkCollisions(blocks, 'x');
+
+                // Physics Step Y
+                this.vy += CONFIG.gravity;
+                this.y += this.vy;
+                this.grounded = false;
+                this.checkCollisions(blocks, 'y');
+
+                // World Boundaries
+                if(this.x < 0) this.x = 0;
+                if(this.x + this.w > worldWidth) this.x = worldWidth - this.w;
+
+                // --- VOID/DEATH CHECK ---
+                for(let block of blocks) {
+                    if (block instanceof VoidZone && checkRectCollide(this, block)) {
+                        createExplosion(this.x, this.y, '#ff0000', 30);
+                        resetLevel();
+                        return; // Stop update loop immediately
+                    }
+                }
+                
+                // Death (Fall below screen) - Fallback for massive geometry errors
+                if(this.y > screenHeight + 100) { 
+                    createExplosion(this.x, this.y, this.color);
+                    resetLevel();
+                }
+            }
+
+            jump() {
+                if (this.grounded) {
+                    this.vy = -CONFIG.playerJump;
+                    this.jumps = 1;
+                    createExplosion(this.x + this.w/2, this.y + this.h, '#fff', 5);
+                } else if (this.jumps < this.maxJumps) {
+                    this.vy = -CONFIG.playerJump * 0.9;
+                    this.jumps++;
+                    createExplosion(this.x + this.w/2, this.y + this.h, CONFIG.colors.player, 5);
+                }
+            }
+
+            checkCollisions(blocks, axis) {
+                for (let block of blocks) {
+                    // Only check against solid blocks (not VoidZones)
+                    if (block instanceof VoidZone) continue;
+                    
+                    // Skip collision check if the block is currently being dragged
+                    if (block.isDragging) continue;
+
+                    if (checkRectCollide(this, block)) {
+                        if (axis === 'x') {
+                            if (this.vx > 0) this.x = block.x - this.w;
+                            else if (this.vx < 0) this.x = block.x + block.w;
+                            this.vx = 0;
+                        } else {
+                            if (this.vy > 0) { // Falling onto block
+                                this.y = block.y - this.h;
+                                this.grounded = true;
+                                this.jumps = 0;
+                            } else if (this.vy < 0) { // Hitting head
+                                this.y = block.y + block.h;
+                            }
+                            this.vy = 0;
+                        }
+                    }
+                }
+            }
+        }
+
+        class Specter extends Entity {
+            constructor(x, y) {
+                super(x, y, 20, 20, CONFIG.colors.specter); // Smaller and red
+                this.speed = 2; // Random movement speed
+                this.direction = Math.random() < 0.5 ? 1 : -1; // -1 for left, 1 for right
+                this.wanderTimer = 0;
+                this.wanderInterval = 100 + Math.random() * 200; // Change direction every few seconds
+            }
+
+            draw() {
+                // Brighter glow
+                ctx.shadowBlur = 20;
+                ctx.shadowColor = this.color;
+                ctx.fillStyle = this.color;
+                ctx.fillRect(this.x, this.y, this.w, this.h);
+                ctx.shadowBlur = 0;
+            }
+
+            update() {
+                // Random horizontal movement
+                this.vx = this.speed * this.direction;
+                this.x += this.vx;
+
+                this.wanderTimer++;
+                if (this.wanderTimer > this.wanderInterval) {
+                    this.direction *= -1; // Reverse direction
+                    this.wanderTimer = 0;
+                    this.wanderInterval = 100 + Math.random() * 200;
+                }
+
+                // World boundaries for specter
+                if (this.x < 0 || this.x + this.w > worldWidth) {
+                    this.direction *= -1;
+                    this.x = Math.max(0, Math.min(this.x, worldWidth - this.w)); // Clamp position
+                }
+
+                // Specter floats, no gravity or block collision for it
+                // We'll give it a slight vertical bob for movement
+                this.y = screenHeight - 150 + Math.sin(Date.now() * 0.003 + this.x * 0.01) * 30;
+            }
+        }
+
+        class Block extends Entity {
+            constructor(x, y, type) {
+                super(x, y, CONFIG.blockSize, CONFIG.blockSize, 
+                      type === 'movable' ? CONFIG.colors.blockMovable : CONFIG.colors.blockStatic);
+                this.type = type; 
+                this.isDragging = false;
+            }
+
+            update(otherBlocks) {
+                if (this.type === 'static') return;
+
+                if (this.isDragging) {
+                    // Use worldX for dragging since we have a camera now
+                    this.vx = (mouse.worldX - this.w/2 - this.x) * 0.2;
+                    this.vy = (mouse.y - this.h/2 - this.y) * 0.2;
+                    this.x += this.vx;
+                    this.y += this.vy;
+                    this.vx = 0;
+                    this.vy = 0;
+                    return;
+                }
+
+                // Gravity for movable blocks
+                this.vy += CONFIG.gravity;
+                this.y += this.vy;
+
+                this.grounded = false;
+                for (let other of otherBlocks) {
+                    if (other === this || other instanceof VoidZone) continue; // Ignore self and VoidZones
+                    if (checkRectCollide(this, other)) {
+                        if (this.vy > 0 && this.y + this.h < other.y + other.h/2 + this.vy + 10) {
+                            this.y = other.y - this.h;
+                            this.vy = 0;
+                            this.grounded = true;
+                        }
+                    }
+                }
+                
+                if(this.y + this.h > screenHeight) {
+                    this.y = screenHeight - this.h;
+                    this.vy = 0;
+                    this.grounded = true;
+                }
+                
+                this.vx *= 0.9;
+                this.x += this.vx;
+            }
+        }
+
+        // --- UTILS ---
+
+        function checkRectCollide(r1, r2) {
+            return r1.x < r2.x + r2.w &&
+                   r1.x + r1.w > r2.x &&
+                   r1.y < r2.y + r2.h &&
+                   r1.y + r1.h > r2.y;
+        }
+
+        function createExplosion(x, y, color, count = 10) {
+            for(let i=0; i<count; i++) {
+                particles.push({
+                    x: x, y: y,
+                    vx: (Math.random() - 0.5) * 10,
+                    vy: (Math.random() - 0.5) * 10,
+                    life: 1.0,
+                    color: color
+                });
+            }
+        }
+
+        // --- LEVEL GENERATION ---
+
+        let player;
+        let specter; // New Specter instance
+        let startGate, endGate;
+        let blocks = [];
+
+        function generateLevel(lvl) {
+            blocks = [];
+            worldWidth = screenWidth * CONFIG.worldMultiplier;
+
+            const gapChanceThreshold = Math.max(0.4, 0.7 - lvl * 0.02);
+            const maxGapIncrease = Math.min(600, 200 + lvl * 50);
+
+            // 1. Start Gate & Player
+            startGate = new Gate(50, screenHeight - 170, false);
+            player = new Player(70, screenHeight - 200);
+            
+            // 2. Specter Spawn - Place it somewhere safe initially
+            specter = new Specter(worldWidth / 2, screenHeight - 150); 
+
+            // 3. Generate Floor & Gaps across WORLD width
+            let currentX = 0;
+            
+            // Start Platform (safe zone)
+            let safeZone = 300;
+            for(let bx = 0; bx < safeZone; bx += CONFIG.blockSize) {
+                blocks.push(new Block(bx, screenHeight - CONFIG.blockSize, 'static'));
+            }
+            currentX = safeZone;
+
+            while(currentX < worldWidth) {
+                // End Zone Protection
+                if (currentX > worldWidth - 400) {
+                    let startBlockX = Math.floor(currentX / CONFIG.blockSize) * CONFIG.blockSize;
+                    for(let bx = startBlockX; bx < worldWidth; bx += CONFIG.blockSize) {
+                         blocks.push(new Block(bx, screenHeight - CONFIG.blockSize, 'static'));
+                    }
+                    break;
+                }
+
+                if (Math.random() > gapChanceThreshold) {
+                    let gapSize = 100 + Math.random() * maxGapIncrease;
+                    let voidX = currentX;
+                    let voidW = gapSize;
+                    blocks.push(new VoidZone(voidX, screenHeight - CONFIG.blockSize, voidW, CONFIG.blockSize * 10)); 
+                    currentX += gapSize;
+                } else {
+                    let platWidth = 100 + Math.random() * 400;
+                    let startBlockX = Math.floor(currentX / CONFIG.blockSize) * CONFIG.blockSize;
+                    let endBlockX = Math.floor((currentX + platWidth) / CONFIG.blockSize) * CONFIG.blockSize;
+                    
+                    let platHeight = screenHeight - CONFIG.blockSize;
+                    if (Math.random() > 0.4) platHeight -= CONFIG.blockSize * Math.floor(Math.random() * 4);
+
+                    for(let bx = startBlockX; bx < endBlockX; bx += CONFIG.blockSize) {
+                         blocks.push(new Block(bx, platHeight, 'static'));
+                    }
+                    currentX = endBlockX;
+                }
+            }
+
+            // 4. Obstacles
+            blocks.forEach(b => {
+                if(b.type === 'static' && Math.random() > 0.9 && b.x > 300 && b.x < worldWidth - 300) {
+                    blocks.push(new Block(b.x, b.y - CONFIG.blockSize, 'static'));
+                }
+            });
+
+            // 5. Movable Blocks
+            let movableCount = 4 + Math.floor(lvl * 0.8);
+            for(let i=0; i<movableCount; i++) {
+                blocks.push(new Block(300 + Math.random() * (worldWidth/2), screenHeight - 300 - (i*60), 'movable'));
+            }
+
+            // 6. End Gate
+            let floorBlocks = blocks.filter(b => b.type === 'static' && !(b instanceof VoidZone));
+            let lastBlock = floorBlocks.sort((a,b) => b.x - a.x)[0];
+            
+            if(lastBlock) {
+                endGate = new Gate(lastBlock.x, lastBlock.y - 120, true);
+            } else {
+                endGate = new Gate(worldWidth - 150, screenHeight - 170, true);
+            }
+
+            document.getElementById('level-indicator').innerText = "LEVEL " + lvl;
+        }
+
+        // Resets the current level without incrementing the level number (used on death)
+        function resetLevel() {
+            generateLevel(level);
+        }
+
+        // Completes the current challenge and loads a new challenge at the SAME level difficulty (used on gate entry)
+        function completeLevel() {
+            // Level is NOT incremented
+            generateLevel(level); 
+            createExplosion(player.x, player.y, '#00ff00', 50);
+        }
+
+        // --- INPUT LISTENERS ---
+
+        window.addEventListener('keydown', e => {
+            if (e.key === 'a' || e.key === 'A') keys.a = true;
+            if (e.key === 'd' || e.key === 'D') keys.d = true;
+            if (e.key === ' ') {
+                if (!keys.spacePressed) {
+                    player.jump();
+                    keys.spacePressed = true;
+                }
+                keys.space = true;
+            }
+        });
+
+        window.addEventListener('keyup', e => {
+            if (e.key === 'a' || e.key === 'A') keys.a = false;
+            if (e.key === 'd' || e.key === 'D') keys.d = false;
+            if (e.key === ' ') {
+                keys.space = false;
+                keys.spacePressed = false;
+            }
+        });
+
+        canvas.addEventListener('mousedown', e => {
+            mouse.down = true;
+            mouse.x = e.clientX;
+            mouse.y = e.clientY;
+            // Calculate world position based on camera
+            mouse.worldX = e.clientX + cameraX;
+
+            for(let block of blocks) {
+                if(block.type === 'movable' && 
+                   mouse.worldX > block.x && mouse.worldX < block.x + block.w &&
+                   mouse.y > block.y && mouse.y < block.y + block.h) {
+                    mouse.draggedBlock = block;
+                    block.isDragging = true;
+                    break;
+                }
+            }
+        });
+
+        window.addEventListener('mousemove', e => {
+            mouse.x = e.clientX;
+            mouse.y = e.clientY;
+            mouse.worldX = e.clientX + cameraX;
+        });
+
+        window.addEventListener('mouseup', e => {
+            mouse.down = false;
+            if(mouse.draggedBlock) {
+                mouse.draggedBlock.isDragging = false;
+                mouse.draggedBlock = null;
+            }
+        });
+
+
+        // --- MAIN LOOP ---
+
+        function loop() {
+            // Camera Logic
+            let targetCamX = player.x - screenWidth / 2 + player.w / 2;
+            targetCamX = Math.max(0, Math.min(targetCamX, worldWidth - screenWidth));
+            cameraX += (targetCamX - cameraX) * 0.1;
+
+            // CLEAR
+            ctx.fillStyle = CONFIG.colors.bg;
+            ctx.fillRect(0, 0, screenWidth, screenHeight);
+
+            ctx.save();
+            ctx.translate(-cameraX, 0);
+
+            // --- DRAW WORLD ---
+
+            startGate.draw();
+            endGate.draw();
+
+            // Check if player is INSIDE the gate -> Complete current challenge
+            if (checkRectCollide(player, endGate)) {
+                completeLevel();
+            }
+
+            // Particles
+            for(let i=particles.length-1; i>=0; i--) {
+                let p = particles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 0.02;
+                ctx.fillStyle = p.color;
+                ctx.globalAlpha = p.life;
+                ctx.fillRect(p.x, p.y, 5, 5);
+                ctx.globalAlpha = 1;
+                if(p.life <= 0) particles.splice(i, 1);
+            }
+
+            // Blocks (including VoidZones)
+            blocks.forEach(b => {
+                b.update(blocks);
+                b.draw();
+            });
+
+            // Specter update and draw
+            specter.update();
+            specter.draw();
+
+            // Check collision between player and specter
+            if (checkRectCollide(player, specter)) {
+                createExplosion(player.x, player.y, CONFIG.colors.specter, 40);
+                resetLevel(); // Player dies if touched by specter
+            }
+
+
+            // Player
+            player.update(blocks);
+            player.draw();
+
+            ctx.restore();
+            requestAnimationFrame(loop);
+        }
+
+        generateLevel(level);
+        loop();
+
+    </script>
+</body>
+</html>
