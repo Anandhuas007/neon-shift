@@ -19,19 +19,24 @@
             position: absolute;
             top: 20px;
             left: 20px;
-            color: #00ffcc;
             pointer-events: none;
             z-index: 10;
         }
         h1 {
             margin: 0;
             font-size: 24px;
-            text-shadow: 0 0 10px #00ffcc;
         }
         p {
             margin: 5px 0;
             font-size: 14px;
             color: #aaa;
+        }
+        #jump-ball-count {
+            color: #ffffaa; 
+            text-shadow: 0 0 5px #ffffaa; 
+            font-weight: bold;
+            font-size: 16px;
+            margin-top: 10px;
         }
         #level-indicator {
             position: absolute;
@@ -39,8 +44,6 @@
             right: 20px;
             font-size: 30px;
             font-weight: bold;
-            color: #ff0055;
-            text-shadow: 0 0 10px #ff0055;
             z-index: 10;
         }
     </style>
@@ -49,7 +52,8 @@
 
     <div id="ui">
         <h1>NEON SHIFT</h1>
-        <p>[A/D] Move &nbsp; [SPACE] Jump / Double Jump</p>
+        <p id="controls-info">[A/D] Move &nbsp; [SPACE] Jump</p>
+        <p id="jump-ball-count">JUMPS: 0/5</p>
         <p>[MOUSE] Drag Orange Blocks</p>
     </div>
     <div id="level-indicator">LEVEL 1</div>
@@ -59,23 +63,39 @@
         const canvas = document.getElementById('gameCanvas');
         const ctx = canvas.getContext('2d');
 
+        // --- THEME DEFINITIONS ---
+        const THEME_COLORS = [
+            // Theme 1: Cyan/Orange (Default)
+            { player: '#00ffcc', gate: '#0088ff', portal: '#00ff00', levelIndicator: '#ff0055', movable: '#ff8800' },
+            // Theme 2: Magenta/Yellow
+            { player: '#ff00ff', gate: '#aa00ff', portal: '#ffff00', levelIndicator: '#00ff00', movable: '#00ffff' },
+            // Theme 3: Yellow/Blue
+            { player: '#ffff00', gate: '#33ccff', portal: '#ff00ff', levelIndicator: '#ff8800', movable: '#00ffcc' },
+            // Theme 4: Green/Red
+            { player: '#00ff00', gate: '#55ff55', portal: '#ff5500', levelIndicator: '#ff00ff', movable: '#ffff00' },
+        ];
+
+
         // --- CONFIGURATION ---
         const CONFIG = {
             gravity: 0.6,
             friction: 0.8,
-            playerSpeed: 1.0,
+            playerSpeed: 1.0, 
             playerJump: 12,
             blockSize: 50,
             worldMultiplier: 2.5, // Map is 2.5x screen width
             colors: {
-                player: '#00ffcc',
-                blockStatic: '#444',
+                // Base colors (These will be updated by applyTheme)
+                player: '#00ffcc', 
                 blockMovable: '#ff8800',
                 portal: '#00ff00',
                 gate: '#0088ff',
-                void: '#550000', // New color for void
+                // Constant colors
+                blockStatic: '#444',
+                void: '#550000', 
                 bg: '#111',
-                specter: '#ff0000' // New color for Specter
+                specter: '#ff0000',
+                collectible: '#ffffaa' // New collectible color
             }
         };
 
@@ -91,9 +111,36 @@
         window.addEventListener('resize', resize);
         resize();
 
+        // --- THEME LOGIC ---
+
+        function applyTheme(lvl) {
+            const themeIndex = (lvl - 1) % THEME_COLORS.length;
+            const theme = THEME_COLORS[themeIndex];
+            
+            // Update CONFIG colors used by entity constructors
+            CONFIG.colors.player = theme.player;
+            CONFIG.colors.gate = theme.gate;
+            CONFIG.colors.portal = theme.portal;
+            CONFIG.colors.blockMovable = theme.movable;
+            
+            // Update UI element styles for the current theme
+            const uiElement = document.getElementById('ui');
+            const levelIndicatorElement = document.getElementById('level-indicator');
+
+            uiElement.style.color = theme.player;
+            uiElement.querySelector('h1').style.textShadow = `0 0 10px ${theme.player}`;
+            
+            levelIndicatorElement.style.color = theme.levelIndicator;
+            levelIndicatorElement.style.textShadow = `0 0 10px ${theme.levelIndicator}`;
+        }
+
+
         // --- GAME STATE ---
-        let level = 1; // This now controls the difficulty seed, but doesn't auto-increment.
+        let level = 1; 
         let particles = [];
+        let spawnedCollectible = null; // Reference to the single ball spawned in the current level
+        let carriedJumpBallCount = 0; // State carried between levels
+
         
         const keys = {
             a: false,
@@ -128,7 +175,7 @@
                 ctx.fillStyle = this.color;
                 ctx.fillRect(this.x, this.y, this.w, this.h);
                 
-                // Neon Glow
+                // Base Neon Glow (will be overridden by Player)
                 ctx.shadowBlur = 15;
                 ctx.shadowColor = this.color;
                 ctx.strokeStyle = '#fff';
@@ -145,8 +192,40 @@
             }
         }
 
-        class Gate extends Entity { // Extend Entity for consistent drawing/positioning
+        class Collectible extends Entity {
+            constructor(x, y) {
+                super(x, y, 15, 15, CONFIG.colors.collectible);
+            }
+
+            draw() {
+                // Draw a circle for the ball
+                ctx.shadowBlur = 25;
+                ctx.shadowColor = this.color;
+                ctx.fillStyle = this.color;
+                
+                ctx.beginPath();
+                ctx.arc(this.x + this.w/2, this.y + this.h/2, this.w/2, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Add a small inner glow for flair
+                ctx.shadowBlur = 5;
+                ctx.shadowColor = '#fff';
+                ctx.fillStyle = '#fff';
+                ctx.beginPath();
+                ctx.arc(this.x + this.w/2, this.y + this.h/2, this.w/4, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.shadowBlur = 0;
+            }
+            update() { 
+                // Slight vertical bobbing animation
+                this.y += Math.sin(Date.now() * 0.005) * 0.5;
+            }
+        }
+
+        class Gate extends Entity { 
             constructor(x, y, isExit) {
+                // Use the updated CONFIG colors
                 super(x, y, 80, 120, isExit ? CONFIG.colors.portal : CONFIG.colors.gate);
                 this.isExit = isExit;
             }
@@ -178,7 +257,7 @@
         
         class VoidZone extends Entity {
             constructor(x, y, w, h) {
-                super(x, y, w, h, CONFIG.colors.void); // Dark red/maroon
+                super(x, y, w, h, CONFIG.colors.void); 
             }
             draw() {
                 // Draw a subtle red glow / warning border
@@ -197,13 +276,37 @@
 
         class Player extends Entity {
             constructor(x, y) {
+                // Use the updated CONFIG colors
                 super(x, y, 40, 40, CONFIG.colors.player);
                 this.jumps = 0;
-                this.maxJumps = 2;
+                this.maxJumps = 2; // Allows ground jump + one aerial jump attempt
+                this.jumpBallCount = 0; // NEW: Inventory count
+                this.maxJumpBalls = 5; // NEW: Max capacity
+            }
+            
+            // Custom draw to handle variable glow
+            draw() {
+                // Determine glow intensity based on jump balls (0 to 5, mapping to blur 10 to 40)
+                const glowIntensity = 10 + (this.jumpBallCount * 6); 
+                
+                // Determine line thickness (2px base + 0.8px per ball, max 6px)
+                const lineThickness = 2 + (this.jumpBallCount * 0.8);
+
+                // Use the theme color (this.color is set by applyTheme)
+                ctx.fillStyle = this.color;
+                ctx.fillRect(this.x, this.y, this.w, this.h);
+                
+                // Enhanced Neon Glow and Thickness
+                ctx.shadowBlur = glowIntensity;
+                ctx.shadowColor = this.color;
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = lineThickness; // Use calculated thickness
+                ctx.strokeRect(this.x, this.y, this.w, this.h);
+                ctx.shadowBlur = 0;
             }
 
             update(blocks) {
-                // Horizontal Movement
+                // Horizontal Movement - Fixed speed impulse
                 if (keys.a) this.vx -= CONFIG.playerSpeed;
                 if (keys.d) this.vx += CONFIG.playerSpeed;
                 
@@ -223,19 +326,35 @@
                 if(this.x < 0) this.x = 0;
                 if(this.x + this.w > worldWidth) this.x = worldWidth - this.w;
 
+                // --- CHECK FOR COLLECTIBLE ---
+                if (spawnedCollectible && checkRectCollide(this, spawnedCollectible)) {
+                    if (this.jumpBallCount < this.maxJumpBalls) {
+                        this.jumpBallCount++; // Increment count
+                        createExplosion(spawnedCollectible.x, spawnedCollectible.y, CONFIG.colors.collectible, 15);
+                        spawnedCollectible = null; // Remove from play
+                        updateUI();
+                    }
+                }
+
                 // --- VOID/DEATH CHECK ---
+                let isDead = false;
                 for(let block of blocks) {
                     if (block instanceof VoidZone && checkRectCollide(this, block)) {
                         createExplosion(this.x, this.y, '#ff0000', 30);
-                        resetLevel();
-                        return; // Stop update loop immediately
+                        isDead = true;
+                        break;
                     }
                 }
                 
                 // Death (Fall below screen) - Fallback for massive geometry errors
                 if(this.y > screenHeight + 100) { 
                     createExplosion(this.x, this.y, this.color);
+                    isDead = true;
+                }
+
+                if (isDead) {
                     resetLevel();
+                    return; // Stop update loop immediately
                 }
             }
 
@@ -244,9 +363,13 @@
                     this.vy = -CONFIG.playerJump;
                     this.jumps = 1;
                     createExplosion(this.x + this.w/2, this.y + this.h, '#fff', 5);
-                } else if (this.jumps < this.maxJumps) {
+                } 
+                // Double jump consumes a ball charge (and ensures player hasn't already double-jumped)
+                else if (this.jumps < this.maxJumps && this.jumpBallCount > 0) { 
                     this.vy = -CONFIG.playerJump * 0.9;
                     this.jumps++;
+                    this.jumpBallCount--; // Consume charge
+                    updateUI();
                     createExplosion(this.x + this.w/2, this.y + this.h, CONFIG.colors.player, 5);
                 }
             }
@@ -318,11 +441,24 @@
                 // Specter floats, no gravity or block collision for it
                 // We'll give it a slight vertical bob for movement
                 this.y = screenHeight - 150 + Math.sin(Date.now() * 0.003 + this.x * 0.01) * 30;
+
+                // --- Particle Generation ---
+                if (Math.random() < 0.3) {
+                    particles.push({
+                        x: this.x + this.w / 2, 
+                        y: this.y + this.h / 2,
+                        vx: this.vx * 0.1 + (Math.random() - 0.5) * 0.5, // Particles trail slightly behind
+                        vy: (Math.random() - 0.5) * 1,
+                        life: 0.3, // Short life
+                        color: CONFIG.colors.specter
+                    });
+                }
             }
         }
 
         class Block extends Entity {
             constructor(x, y, type) {
+                // Use the updated CONFIG colors
                 super(x, y, CONFIG.blockSize, CONFIG.blockSize, 
                       type === 'movable' ? CONFIG.colors.blockMovable : CONFIG.colors.blockStatic);
                 this.type = type; 
@@ -359,7 +495,8 @@
                     }
                 }
                 
-                if(this.y + this.h > screenHeight) {
+                this.y = Math.min(this.y, screenHeight - this.h); // Prevent blocks from sinking past bottom of screen
+                if(this.y + this.h >= screenHeight) {
                     this.y = screenHeight - this.h;
                     this.vy = 0;
                     this.grounded = true;
@@ -373,6 +510,8 @@
         // --- UTILS ---
 
         function checkRectCollide(r1, r2) {
+            // Note: Since the Collectible is a circle, this approximation is okay for now, 
+            // but for better accuracy, check circle-rect collision here.
             return r1.x < r2.x + r2.w &&
                    r1.x + r1.w > r2.x &&
                    r1.y < r2.y + r2.h &&
@@ -391,16 +530,35 @@
             }
         }
 
+        // --- UI Update Function ---
+        function updateUI() {
+            if (player) {
+                document.getElementById('jump-ball-count').innerText = 
+                    `JUMPS: ${player.jumpBallCount}/${player.maxJumpBalls}`;
+                
+                // Update controls info based on ball availability
+                document.getElementById('controls-info').innerText = 
+                    player.jumpBallCount > 0 
+                        ? "[A/D] Move &nbsp; [SPACE] Jump / Double Jump (Charge Used)"
+                        : "[A/D] Move &nbsp; [SPACE] Jump (Ball Required for Second Jump)";
+            }
+        }
+
+
         // --- LEVEL GENERATION ---
 
         let player;
-        let specter; // New Specter instance
+        let specter; 
         let startGate, endGate;
         let blocks = [];
 
         function generateLevel(lvl) {
+            // APPLY THEME BEFORE CREATING ENTITIES
+            applyTheme(lvl); 
+
             blocks = [];
             worldWidth = screenWidth * CONFIG.worldMultiplier;
+            spawnedCollectible = null; // Reset spawned ball for the new level
 
             const gapChanceThreshold = Math.max(0.4, 0.7 - lvl * 0.02);
             const maxGapIncrease = Math.min(600, 200 + lvl * 50);
@@ -408,12 +566,15 @@
             // 1. Start Gate & Player
             startGate = new Gate(50, screenHeight - 170, false);
             player = new Player(70, screenHeight - 200);
+            player.jumpBallCount = carriedJumpBallCount; // Load carried count
             
             // 2. Specter Spawn - Place it somewhere safe initially
             specter = new Specter(worldWidth / 2, screenHeight - 150); 
 
             // 3. Generate Floor & Gaps across WORLD width
             let currentX = 0;
+            let potentialBallSpotX = 0;
+            let potentialBallSpotY = 0;
             
             // Start Platform (safe zone)
             let safeZone = 300;
@@ -447,24 +608,32 @@
                     if (Math.random() > 0.4) platHeight -= CONFIG.blockSize * Math.floor(Math.random() * 4);
 
                     for(let bx = startBlockX; bx < endBlockX; bx += CONFIG.blockSize) {
-                         blocks.push(new Block(bx, platHeight, 'static'));
+                         let newBlock = new Block(bx, platHeight, 'static');
+                         blocks.push(newBlock);
+                         // Set a potential spot for the jump ball
+                         if (Math.random() > 0.95 && newBlock.x > 500 && newBlock.x < worldWidth - 500) {
+                             potentialBallSpotX = newBlock.x + newBlock.w/2 - 7.5; // Center the 15px ball
+                             potentialBallSpotY = newBlock.y - newBlock.h - 10;
+                         }
                     }
                     currentX = endBlockX;
                 }
             }
 
-            // 4. Obstacles
-            blocks.forEach(b => {
-                if(b.type === 'static' && Math.random() > 0.9 && b.x > 300 && b.x < worldWidth - 300) {
-                    blocks.push(new Block(b.x, b.y - CONFIG.blockSize, 'static'));
-                }
-            });
-
-            // 5. Movable Blocks
+            // 4. Obstacles / Movable Blocks
             let movableCount = 4 + Math.floor(lvl * 0.8);
             for(let i=0; i<movableCount; i++) {
                 blocks.push(new Block(300 + Math.random() * (worldWidth/2), screenHeight - 300 - (i*60), 'movable'));
             }
+
+            // 5. Place Collectible
+            if (potentialBallSpotX > 0) {
+                spawnedCollectible = new Collectible(potentialBallSpotX, potentialBallSpotY);
+            } else {
+                // Fallback position if no good spot was found
+                spawnedCollectible = new Collectible(worldWidth * 0.5, screenHeight - 200);
+            }
+
 
             // 6. End Gate
             let floorBlocks = blocks.filter(b => b.type === 'static' && !(b instanceof VoidZone));
@@ -477,18 +646,22 @@
             }
 
             document.getElementById('level-indicator').innerText = "LEVEL " + lvl;
+            updateUI(); // Initial UI display
         }
 
         // Resets the current level without incrementing the level number (used on death)
         function resetLevel() {
+            carriedJumpBallCount = 0; // Loss all balls on death
             generateLevel(level);
         }
 
         // Completes the current challenge and loads a new challenge at the SAME level difficulty (used on gate entry)
         function completeLevel() {
-            // Level is NOT incremented
+            carriedJumpBallCount = player.jumpBallCount; // Carry over collected balls
+            level++;
             generateLevel(level); 
-            createExplosion(player.x, player.y, '#00ff00', 50);
+            // Explosion uses the NEW player color from the new level
+            createExplosion(player.x, player.y, CONFIG.colors.player, 50); 
         }
 
         // --- INPUT LISTENERS ---
@@ -585,6 +758,12 @@
                 if(p.life <= 0) particles.splice(i, 1);
             }
 
+            // Collectible
+            if (spawnedCollectible) {
+                spawnedCollectible.update();
+                spawnedCollectible.draw();
+            }
+
             // Blocks (including VoidZones)
             blocks.forEach(b => {
                 b.update(blocks);
@@ -604,7 +783,7 @@
 
             // Player
             player.update(blocks);
-            player.draw();
+            player.draw(); // Now handles glow and line thickness based on inventory
 
             ctx.restore();
             requestAnimationFrame(loop);
